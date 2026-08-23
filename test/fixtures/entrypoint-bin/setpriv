@@ -1,0 +1,10 @@
+#!/bin/sh
+printf '%s\n' "$*" >> "${ENTRYPOINT_SETPRIV_LOG:?}"
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--" ]; then
+    shift
+    exec "$@"
+  fi
+  shift
+done
+exit 1

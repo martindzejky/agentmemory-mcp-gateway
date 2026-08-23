@@ -28,6 +28,7 @@ COPY --from=build /app/package.json /app/package-lock.json ./
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY docker-entrypoint.sh /app/docker-entrypoint.sh
+COPY scripts/validate-database-path.sh /app/scripts/validate-database-path.sh
 RUN chmod 0755 /app/docker-entrypoint.sh
 
 ENV NODE_ENV=production
