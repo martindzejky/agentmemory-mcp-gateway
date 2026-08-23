@@ -191,6 +191,7 @@ export async function startGateway(
     env?: NodeJS.ProcessEnv;
     seed?: boolean;
     mock?: MockAgentMemory;
+    trustedProxyHeaders?: boolean;
   } = {},
 ): Promise<{
   env: NodeJS.ProcessEnv;
@@ -208,7 +209,10 @@ export async function startGateway(
       ADMIN_PASSWORD,
     });
   }
-  const config = testConfig(env);
+  const config = {
+    ...testConfig(env),
+    trustedProxyHeaders: options.trustedProxyHeaders === true,
+  };
   const mock = options.mock ?? createMockAgentMemory();
   const gateway = await createGatewayApp(config, {
     requireSoleUser: options.seed !== false,

@@ -32,12 +32,26 @@ export function resetRateLimits(): void {
   buckets.clear();
 }
 
-function clientKey(c: Context): string {
-  const forwarded = c.req.header("x-forwarded-for");
-  if (forwarded) {
-    return forwarded.split(",")[0]?.trim() || "unknown";
+function lastForwardedHop(value: string | undefined): string | undefined {
+  if (!value) {
+    return undefined;
   }
-  return c.req.header("x-real-ip") || "unknown";
+  const hops = value
+    .split(",")
+    .map((hop) => hop.trim())
+    .filter(Boolean);
+  return hops.at(-1);
+}
+
+function clientKey(c: Context, trustedProxyHeaders: boolean): string {
+  if (!trustedProxyHeaders) {
+    return "direct";
+  }
+  const realIp = c.req.header("x-real-ip")?.trim();
+  if (realIp) {
+    return realIp;
+  }
+  return lastForwardedHop(c.req.header("x-forwarded-for")) || "unknown";
 }
 
 export function isBlockedUserManagementPath(pathname: string): boolean {
@@ -54,7 +68,9 @@ export function blockUserManagement(): MiddlewareHandler {
   };
 }
 
-export function rateLimitSensitiveRoutes(): MiddlewareHandler {
+export function rateLimitSensitiveRoutes(
+  config: Pick<GatewayConfig, "trustedProxyHeaders">,
+): MiddlewareHandler {
   return async (c, next) => {
     const rule = RATE_LIMITED_PATHS.find(
       (item) => c.req.path === item.prefix || c.req.path.startsWith(`${item.prefix}/`),
@@ -62,7 +78,7 @@ export function rateLimitSensitiveRoutes(): MiddlewareHandler {
     if (!rule) {
       return next();
     }
-    const key = `${clientKey(c)}:${rule.prefix}`;
+    const key = `${clientKey(c, config.trustedProxyHeaders)}:${rule.prefix}`;
     const now = Date.now();
     const current = buckets.get(key);
     if (!current || current.resetAt <= now) {

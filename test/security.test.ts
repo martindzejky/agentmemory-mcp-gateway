@@ -142,4 +142,71 @@ describe("single-user seed and HTTP controls", () => {
     expect(captured).not.toContain(BACKEND_SECRET);
     expect(captured).not.toContain(ADMIN_PASSWORD);
   });
+
+  it("ignores spoofed forwarded-for headers when proxy trust is off", async () => {
+    const ctx = await startGateway();
+    restore = ctx.restoreFetch;
+    close = () => ctx.gateway.close();
+    const statuses: number[] = [];
+    for (let i = 0; i < 11; i += 1) {
+      const response = await request(ctx.gateway.app, "/sign-in", {
+        method: "POST",
+        host: ctx.config.publicHost,
+        headers: {
+          "content-type": "application/x-www-form-urlencoded",
+          "x-forwarded-for": `203.0.113.${i}`,
+        },
+        body: new URLSearchParams({
+          email: ADMIN_EMAIL,
+          password: "wrong-password-that-is-long",
+        }),
+        redirect: "manual",
+      });
+      statuses.push(response.status);
+    }
+    expect(statuses.filter((status) => status === 429)).toHaveLength(1);
+    expect(statuses.at(-1)).toBe(429);
+  });
+
+  it("keys trusted-proxy limits by x-real-ip, not the first forwarded hop", async () => {
+    const ctx = await startGateway({ trustedProxyHeaders: true });
+    restore = ctx.restoreFetch;
+    close = () => ctx.gateway.close();
+
+    const spoofed: number[] = [];
+    for (let i = 0; i < 11; i += 1) {
+      const response = await request(ctx.gateway.app, "/sign-in", {
+        method: "POST",
+        host: ctx.config.publicHost,
+        headers: {
+          "content-type": "application/x-www-form-urlencoded",
+          "x-forwarded-for": `198.51.100.${i}, 10.0.0.1`,
+          "x-real-ip": "10.0.0.1",
+        },
+        body: new URLSearchParams({
+          email: ADMIN_EMAIL,
+          password: "wrong-password-that-is-long",
+        }),
+        redirect: "manual",
+      });
+      spoofed.push(response.status);
+    }
+    expect(spoofed.at(-1)).toBe(429);
+
+    const otherEdge = await request(ctx.gateway.app, "/sign-in", {
+      method: "POST",
+      host: ctx.config.publicHost,
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        "x-forwarded-for": "198.51.100.9, 10.0.0.2",
+        "x-real-ip": "10.0.0.2",
+      },
+      body: new URLSearchParams({
+        email: ADMIN_EMAIL,
+        password: "wrong-password-that-is-long",
+      }),
+      redirect: "manual",
+    });
+    expect(otherEdge.status).not.toBe(429);
+  });
 });

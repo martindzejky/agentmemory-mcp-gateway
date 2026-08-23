@@ -59,7 +59,7 @@ export async function createGatewayApp(
   app.use("*", secureHeaders());
   app.use("*", validateHost(config));
   app.use("*", blockUserManagement());
-  app.use("*", rateLimitSensitiveRoutes());
+  app.use("*", rateLimitSensitiveRoutes(config));
   app.use(
     "*",
     bodyLimit({
