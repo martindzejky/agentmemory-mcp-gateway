@@ -5,7 +5,12 @@ import { secureHeaders } from "hono/secure-headers";
 import { createAgentMemoryClient, type AgentMemoryRequestLog } from "./agentmemory.js";
 import { createGatewayAuth, isAdminSubject, type GatewayAuth } from "./auth.js";
 import type { GatewayConfig } from "./config.js";
-import { isTrustedConsentSubmission, trustedInternalConsentHeaders } from "./consent-origin.js";
+import {
+  createConsentCsrfToken,
+  evaluateConsentTrust,
+  trustedInternalConsentHeaders,
+  verifyConsentCsrfToken,
+} from "./consent-origin.js";
 import { GENERIC_FORBIDDEN } from "./errors.js";
 import { createMcpRouteHandler } from "./mcp.js";
 import { consentPage, loginPage } from "./pages.js";
@@ -124,22 +129,49 @@ export async function createGatewayApp(
     }
   });
 
-  app.get("/consent", (c) => {
+  app.get("/consent", async (c) => {
+    const query = queryString(new URL(c.req.url));
+    const session = await gatewayAuth.auth.api.getSession({ headers: c.req.raw.headers });
+    const csrf = session
+      ? createConsentCsrfToken({
+          secret: config.betterAuthSecret,
+          sessionId: session.session.id,
+          oauthQuery: query,
+        })
+      : "";
     return c.html(
       consentPage({
-        query: queryString(new URL(c.req.url)),
+        query,
         clientId: c.req.query("client_id") ?? "",
         scope: c.req.query("scope") ?? "",
+        csrf,
       }),
     );
   });
 
   app.post("/consent", async (c) => {
-    if (!isTrustedConsentSubmission(c.req.raw.headers, config.publicOrigin)) {
-      return c.json({ error: GENERIC_FORBIDDEN }, 403);
-    }
     const url = new URL(c.req.url);
     const form = await c.req.parseBody();
+    const oauthQuery = queryString(url);
+    const trust = evaluateConsentTrust(c.req.raw.headers, config.publicOrigin);
+    if (trust === "deny") {
+      return c.json({ error: GENERIC_FORBIDDEN }, 403);
+    }
+    if (trust === "csrf") {
+      const session = await gatewayAuth.auth.api.getSession({ headers: c.req.raw.headers });
+      const token = typeof form.csrf === "string" ? form.csrf : "";
+      const csrfOk =
+        !!session &&
+        verifyConsentCsrfToken({
+          secret: config.betterAuthSecret,
+          sessionId: session.session.id,
+          oauthQuery,
+          token,
+        });
+      if (!csrfOk) {
+        return c.json({ error: GENERIC_FORBIDDEN }, 403);
+      }
+    }
     const accept = form.accept === "true";
     const response = await gatewayAuth.auth.handler(
       new Request(new URL("/oauth2/consent", config.publicUrl), {
@@ -148,7 +180,7 @@ export async function createGatewayApp(
         body: JSON.stringify({
           accept,
           scope: url.searchParams.get("scope") ?? undefined,
-          oauth_query: queryString(url) || undefined,
+          oauth_query: oauthQuery || undefined,
         }),
       }),
     );

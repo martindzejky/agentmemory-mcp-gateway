@@ -1,8 +1,12 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { GENERIC_FORBIDDEN } from "../src/errors.js";
 import {
+  CONSENT_CSRF_TTL_SECONDS,
+  createConsentCsrfToken,
+  evaluateConsentTrust,
   isTrustedConsentSubmission,
   trustedInternalConsentHeaders,
+  verifyConsentCsrfToken,
 } from "../src/consent-origin.js";
 import {
   callbackLocation,
@@ -15,6 +19,8 @@ import {
 } from "./helpers.js";
 
 const PUBLIC_ORIGIN = "http://127.0.0.1:8787";
+const SIBLING_ORIGIN = "http://127.0.0.1:9999";
+const CSRF_SECRET = "test-better-auth-secret-32-chars-minimum";
 
 let restore: (() => void) | undefined;
 let close: (() => void) | undefined;
@@ -56,6 +62,16 @@ describe("isTrustedConsentSubmission", () => {
     ).toBe(false);
   });
 
+  it("rejects a sibling same-site Origin", () => {
+    expect(
+      isTrustedConsentSubmission(
+        headers({ origin: SIBLING_ORIGIN, cookie: "better-auth.session=1" }),
+        PUBLIC_ORIGIN,
+      ),
+    ).toBe(false);
+    expect(evaluateConsentTrust(headers({ origin: SIBLING_ORIGIN }), PUBLIC_ORIGIN)).toBe("deny");
+  });
+
   it("rejects Origin: null", () => {
     expect(
       isTrustedConsentSubmission(
@@ -92,27 +108,47 @@ describe("isTrustedConsentSubmission", () => {
     ).toBe(true);
   });
 
-  it("rejects cross-site Fetch Metadata", () => {
+  it("rejects same-site Fetch Metadata", () => {
     expect(
-      isTrustedConsentSubmission(
+      evaluateConsentTrust(
         headers({
-          "sec-fetch-site": "cross-site",
+          "sec-fetch-site": "same-site",
           cookie: "better-auth.session=1",
-          origin: PUBLIC_ORIGIN,
         }),
         PUBLIC_ORIGIN,
       ),
-    ).toBe(false);
+    ).toBe("deny");
   });
 
-  it("accepts a ChatGPT-style form POST with no Origin and a session cookie", () => {
+  it("rejects none and unknown Fetch Metadata as same-origin evidence", () => {
+    expect(evaluateConsentTrust(headers({ "sec-fetch-site": "none" }), PUBLIC_ORIGIN)).toBe("csrf");
+    expect(
+      evaluateConsentTrust(headers({ "sec-fetch-site": "nested-navigate" }), PUBLIC_ORIGIN),
+    ).toBe("csrf");
+    expect(isTrustedConsentSubmission(headers({ "sec-fetch-site": "none" }), PUBLIC_ORIGIN)).toBe(
+      false,
+    );
+  });
+
+  it("rejects cross-site Fetch Metadata", () => {
+    expect(
+      evaluateConsentTrust(
+        headers({
+          "sec-fetch-site": "cross-site",
+          cookie: "better-auth.session=1",
+        }),
+        PUBLIC_ORIGIN,
+      ),
+    ).toBe("deny");
+  });
+
+  it("does not treat a cookie-only request as same-origin evidence", () => {
+    expect(evaluateConsentTrust(headers({ cookie: "better-auth.session=1" }), PUBLIC_ORIGIN)).toBe(
+      "csrf",
+    );
     expect(
       isTrustedConsentSubmission(headers({ cookie: "better-auth.session=1" }), PUBLIC_ORIGIN),
-    ).toBe(true);
-  });
-
-  it("rejects a request with no Origin, Referer, Fetch Metadata, or cookie", () => {
-    expect(isTrustedConsentSubmission(headers(), PUBLIC_ORIGIN)).toBe(false);
+    ).toBe(false);
   });
 
   it("does not treat credentialed or non-http origins as same-origin", () => {
@@ -141,14 +177,75 @@ describe("isTrustedConsentSubmission", () => {
   });
 });
 
+describe("consent CSRF token", () => {
+  it("accepts a token bound to the session and oauth query", () => {
+    const token = createConsentCsrfToken({
+      secret: CSRF_SECRET,
+      sessionId: "session-1",
+      oauthQuery: "client_id=abc&scope=openid",
+    });
+    expect(
+      verifyConsentCsrfToken({
+        secret: CSRF_SECRET,
+        sessionId: "session-1",
+        oauthQuery: "client_id=abc&scope=openid",
+        token,
+      }),
+    ).toBe(true);
+  });
+
+  it("rejects a token for another session or query", () => {
+    const token = createConsentCsrfToken({
+      secret: CSRF_SECRET,
+      sessionId: "session-1",
+      oauthQuery: "client_id=abc",
+    });
+    expect(
+      verifyConsentCsrfToken({
+        secret: CSRF_SECRET,
+        sessionId: "session-2",
+        oauthQuery: "client_id=abc",
+        token,
+      }),
+    ).toBe(false);
+    expect(
+      verifyConsentCsrfToken({
+        secret: CSRF_SECRET,
+        sessionId: "session-1",
+        oauthQuery: "client_id=tampered",
+        token,
+      }),
+    ).toBe(false);
+  });
+
+  it("rejects an expired token", () => {
+    const token = createConsentCsrfToken({
+      secret: CSRF_SECRET,
+      sessionId: "session-1",
+      oauthQuery: "client_id=abc",
+      nowMs: Date.now() - (CONSENT_CSRF_TTL_SECONDS + 5) * 1000,
+    });
+    expect(
+      verifyConsentCsrfToken({
+        secret: CSRF_SECRET,
+        sessionId: "session-1",
+        oauthQuery: "client_id=abc",
+        token,
+      }),
+    ).toBe(false);
+  });
+});
+
 describe("hosted consent with production origin checks", () => {
-  it("completes authorization when the consent POST omits Origin", async () => {
+  it("completes authorization when the consent POST omits Origin and sends the CSRF token", async () => {
     const { gateway, config } = await boot();
     const flow = await prepareConsentFlow(gateway.app, config);
+    expect(flow.csrf).toMatch(/\S/);
     const response = await postConsent(gateway.app, config, {
       path: flow.consentPath,
       cookies: flow.cookies,
       accept: true,
+      csrf: flow.csrf,
     });
     const callback = callbackLocation(response);
     expect(callback).not.toBeNull();
@@ -176,10 +273,35 @@ describe("hosted consent with production origin checks", () => {
       cookies: flow.cookies,
       accept: true,
       headers: { origin: "https://evil.example" },
+      csrf: flow.csrf,
     });
     expect(response.status).toBe(403);
     expect(await response.json()).toEqual({ error: GENERIC_FORBIDDEN });
     expect(callbackLocation(response)).toBeNull();
+  });
+
+  it("rejects a sibling same-site submission", async () => {
+    const { gateway, config } = await boot();
+    const flow = await prepareConsentFlow(gateway.app, config);
+    const byOrigin = await postConsent(gateway.app, config, {
+      path: flow.consentPath,
+      cookies: flow.cookies,
+      accept: true,
+      headers: { origin: SIBLING_ORIGIN },
+      csrf: flow.csrf,
+    });
+    expect(byOrigin.status).toBe(403);
+    expect(await byOrigin.json()).toEqual({ error: GENERIC_FORBIDDEN });
+
+    const byFetchSite = await postConsent(gateway.app, config, {
+      path: flow.consentPath,
+      cookies: flow.cookies,
+      accept: true,
+      headers: { "sec-fetch-site": "same-site" },
+      csrf: flow.csrf,
+    });
+    expect(byFetchSite.status).toBe(403);
+    expect(callbackLocation(byFetchSite)).toBeNull();
   });
 
   it("rejects Origin: null", async () => {
@@ -190,9 +312,23 @@ describe("hosted consent with production origin checks", () => {
       cookies: flow.cookies,
       accept: true,
       headers: { origin: "null" },
+      csrf: flow.csrf,
     });
     expect(response.status).toBe(403);
     expect(await response.json()).toEqual({ error: GENERIC_FORBIDDEN });
+  });
+
+  it("rejects a cookie-only request with no origin evidence", async () => {
+    const { gateway, config } = await boot();
+    const flow = await prepareConsentFlow(gateway.app, config);
+    const response = await postConsent(gateway.app, config, {
+      path: flow.consentPath,
+      cookies: flow.cookies,
+      accept: true,
+    });
+    expect(response.status).toBe(403);
+    expect(await response.json()).toEqual({ error: GENERIC_FORBIDDEN });
+    expect(callbackLocation(response)).toBeNull();
   });
 
   it("rejects a tampered signed OAuth query", async () => {
@@ -204,6 +340,7 @@ describe("hosted consent with production origin checks", () => {
       path: `/consent?${tampered}`,
       cookies: flow.cookies,
       accept: true,
+      csrf: flow.csrf,
     });
     expect(response.status).toBeGreaterThanOrEqual(400);
     expect(callbackLocation(response)?.searchParams.get("code")).toBeFalsy();
@@ -219,6 +356,7 @@ describe("hosted consent with production origin checks", () => {
       path: flow.consentPath,
       cookies: flow.cookies,
       accept: false,
+      csrf: flow.csrf,
     });
     const callback = callbackLocation(response);
     expect(callback).not.toBeNull();
@@ -234,6 +372,7 @@ describe("hosted consent with production origin checks", () => {
       path: flow.consentPath,
       cookies: flow.cookies,
       accept: true,
+      csrf: flow.csrf,
     });
     const code = callbackLocation(consent)?.searchParams.get("code");
     expect(code).toMatch(/\S/);

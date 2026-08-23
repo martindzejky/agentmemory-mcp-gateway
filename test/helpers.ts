@@ -265,6 +265,10 @@ export async function signIn(app: Hono, config: GatewayConfig, query = ""): Prom
   return collectCookies(response);
 }
 
+export function extractConsentCsrf(html: string): string {
+  return html.match(/name="csrf" value="([^"]*)"/)?.[1] ?? "";
+}
+
 export async function prepareConsentFlow(
   app: Hono,
   config: GatewayConfig,
@@ -274,6 +278,7 @@ export async function prepareConsentFlow(
   cookies: string;
   consentPath: string;
   consentQuery: string;
+  csrf: string;
 }> {
   const client = await registerClient(app, config);
   const { verifier, challenge } = pkce();
@@ -294,15 +299,24 @@ export async function prepareConsentFlow(
   for (let i = 0; i < 8 && location; i += 1) {
     const current = new URL(location, config.publicUrl);
     if (current.pathname === "/consent") {
+      const consentPath = `${current.pathname}${current.search}`;
       const consentQuery = current.search.startsWith("?")
         ? current.search.slice(1)
         : current.search;
+      const page = await request(app, consentPath, {
+        method: "GET",
+        host: config.publicHost,
+        headers: { cookie: cookies },
+        redirect: "manual",
+      });
+      cookies = collectCookies(page, cookies);
       return {
         clientId: client.client_id,
         verifier,
         cookies,
-        consentPath: `${current.pathname}${current.search}`,
+        consentPath,
         consentQuery,
+        csrf: extractConsentCsrf(await page.text()),
       };
     }
     const response = await request(app, `${current.pathname}${current.search}`, {
@@ -329,16 +343,21 @@ export async function postConsent(
     cookies: string;
     accept: boolean;
     headers?: HeadersInit;
+    csrf?: string;
   },
 ): Promise<Response> {
   const headers = new Headers(input.headers);
   headers.set("cookie", input.cookies);
   headers.set("content-type", "application/x-www-form-urlencoded");
+  const body = new URLSearchParams({ accept: String(input.accept) });
+  if (input.csrf) {
+    body.set("csrf", input.csrf);
+  }
   return request(app, input.path, {
     method: "POST",
     host: config.publicHost,
     headers,
-    body: new URLSearchParams({ accept: String(input.accept) }),
+    body,
     redirect: "manual",
   });
 }
@@ -390,13 +409,12 @@ export async function getAccessToken(app: Hono, config: GatewayConfig): Promise<
 
   let cookies = await signIn(app, config, authorizeQuery.toString());
   let location: string | null = `/oauth2/authorize?${authorizeQuery}`;
+  let csrf = "";
   const trace: string[] = [];
 
   for (let i = 0; i < 8 && location; i += 1) {
-    const current = new URL(location, config.publicUrl);
-    const isConsentPost =
-      current.pathname === "/consent" && i > 0 && current.search.includes("client_id");
-    const method = current.pathname === "/consent" ? (isConsentPost ? "POST" : "GET") : "GET";
+    const current: URL = new URL(location, config.publicUrl);
+    const method = current.pathname === "/consent" && csrf ? "POST" : "GET";
     const response = await request(app, `${current.pathname}${current.search}`, {
       method,
       host: config.publicHost,
@@ -404,12 +422,18 @@ export async function getAccessToken(app: Hono, config: GatewayConfig): Promise<
         cookie: cookies,
         ...(method === "POST" ? { "content-type": "application/x-www-form-urlencoded" } : {}),
       },
-      body: method === "POST" ? new URLSearchParams({ accept: "true" }) : undefined,
+      body: method === "POST" ? new URLSearchParams({ accept: "true", csrf }) : undefined,
       redirect: "manual",
     });
     cookies = collectCookies(response, cookies);
     let nextLocation = response.headers.get("location");
     const preview = await response.clone().text();
+    if (method === "GET" && current.pathname === "/consent") {
+      csrf = extractConsentCsrf(preview);
+      if (csrf && !nextLocation) {
+        nextLocation = `${current.pathname}${current.search}`;
+      }
+    }
     if (!nextLocation && preview.includes("http://localhost/callback")) {
       try {
         const body = JSON.parse(preview) as { url?: string; redirect_uri?: string };

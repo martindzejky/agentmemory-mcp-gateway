@@ -80,7 +80,12 @@ export function loginPage(query: string, error = false) {
   );
 }
 
-export function consentPage(input: { query: string; clientId: string; scope: string }) {
+export function consentPage(input: {
+  query: string;
+  clientId: string;
+  scope: string;
+  csrf: string;
+}) {
   return layout(
     "Authorize client",
     html`
@@ -91,10 +96,12 @@ export function consentPage(input: { query: string; clientId: string; scope: str
       <div class="actions">
         <form method="post" action="/consent?${input.query}">
           <input type="hidden" name="accept" value="true" />
+          <input type="hidden" name="csrf" value="${escapeHtml(input.csrf)}" />
           <button type="submit">Allow</button>
         </form>
         <form method="post" action="/consent?${input.query}">
           <input type="hidden" name="accept" value="false" />
+          <input type="hidden" name="csrf" value="${escapeHtml(input.csrf)}" />
           <button type="submit">Deny</button>
         </form>
       </div>
