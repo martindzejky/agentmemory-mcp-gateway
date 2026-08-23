@@ -1,0 +1,44 @@
+{
+  "name": "agentmemory-mcp-gateway",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Single-user OAuth MCP gateway for AgentMemory",
+  "engines": {
+    "node": ">=22.14.0"
+  },
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "start": "node dist/start.js",
+    "seed-admin:prod": "node dist/seed-admin.js",
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "eslint .",
+    "format": "prettier --check .",
+    "format:write": "prettier --write .",
+    "seed-admin": "tsx src/seed-admin.ts"
+  },
+  "dependencies": {
+    "@better-auth/cimd": "^1.7.1",
+    "@better-auth/mcp": "^1.7.1",
+    "@hono/node-server": "^2.1.1",
+    "@modelcontextprotocol/server": "^2.0.0",
+    "better-auth": "^1.7.1",
+    "better-sqlite3": "^12.11.1",
+    "hono": "^4.13.3",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/better-sqlite3": "^9.6.0",
+    "@types/node": "^26.2.0",
+    "eslint": "^10.9.0",
+    "prettier": "^3.9.6",
+    "tsx": "^4.23.12",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.67.0",
+    "vitest": "^4.1.11"
+  }
+}
