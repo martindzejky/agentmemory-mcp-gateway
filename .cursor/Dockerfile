@@ -10,6 +10,7 @@ RUN apt-get update && apt-get install -y \
     curl \
     ca-certificates \
     git \
+    python3 \
     sudo \
     && rm -rf /var/lib/apt/lists/*
 
