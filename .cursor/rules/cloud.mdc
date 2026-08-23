@@ -1,0 +1,16 @@
+---
+description: Cloud agent, autonomous delivery
+alwaysApply: true
+metadata:
+  environments: cloud
+  human: false
+---
+
+**Setup:** follow **`README.md`**. Below is only what differs in the cloud environment.
+
+## Environment
+
+- Secrets usually come from the Cursor dashboard.
+- If env vars fail, notify the user and stop.
+- **Do not** create `.env` files in the cloud.
+- Vars from `.env.example` must be set in the dashboard when building or running the gateway (use placeholders where needed; empty strings are not supported).
