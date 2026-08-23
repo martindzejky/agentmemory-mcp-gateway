@@ -192,6 +192,7 @@ export async function startGateway(
     seed?: boolean;
     mock?: MockAgentMemory;
     trustedProxyHeaders?: boolean;
+    productionOriginChecks?: boolean;
   } = {},
 ): Promise<{
   env: NodeJS.ProcessEnv;
@@ -216,6 +217,7 @@ export async function startGateway(
   const mock = options.mock ?? createMockAgentMemory();
   const gateway = await createGatewayApp(config, {
     requireSoleUser: options.seed !== false,
+    productionOriginChecks: options.productionOriginChecks,
     agentMemoryRequestLog: [],
   });
   const restoreFetch = installFetchBridge(gateway.app, config, mock);
@@ -261,6 +263,115 @@ export async function signIn(app: Hono, config: GatewayConfig, query = ""): Prom
     redirect: "manual",
   });
   return collectCookies(response);
+}
+
+export async function prepareConsentFlow(
+  app: Hono,
+  config: GatewayConfig,
+): Promise<{
+  clientId: string;
+  verifier: string;
+  cookies: string;
+  consentPath: string;
+  consentQuery: string;
+}> {
+  const client = await registerClient(app, config);
+  const { verifier, challenge } = pkce();
+  const authorizeQuery = new URLSearchParams({
+    response_type: "code",
+    client_id: client.client_id,
+    redirect_uri: "http://localhost/callback",
+    scope: "openid profile offline_access mcp:tools",
+    code_challenge: challenge,
+    code_challenge_method: "S256",
+    resource: config.mcpResource,
+    state: "test-state",
+  });
+
+  let cookies = await signIn(app, config, authorizeQuery.toString());
+  let location: string | null = `/oauth2/authorize?${authorizeQuery}`;
+
+  for (let i = 0; i < 8 && location; i += 1) {
+    const current = new URL(location, config.publicUrl);
+    if (current.pathname === "/consent") {
+      const consentQuery = current.search.startsWith("?")
+        ? current.search.slice(1)
+        : current.search;
+      return {
+        clientId: client.client_id,
+        verifier,
+        cookies,
+        consentPath: `${current.pathname}${current.search}`,
+        consentQuery,
+      };
+    }
+    const response = await request(app, `${current.pathname}${current.search}`, {
+      method: "GET",
+      host: config.publicHost,
+      headers: { cookie: cookies },
+      redirect: "manual",
+    });
+    cookies = collectCookies(response, cookies);
+    location = response.headers.get("location");
+    if (location?.startsWith("http://localhost/callback") || location?.includes("/callback?")) {
+      throw new Error(`Reached client callback before consent: ${location}`);
+    }
+  }
+
+  throw new Error("Unable to reach the consent screen");
+}
+
+export async function postConsent(
+  app: Hono,
+  config: GatewayConfig,
+  input: {
+    path: string;
+    cookies: string;
+    accept: boolean;
+    headers?: HeadersInit;
+  },
+): Promise<Response> {
+  const headers = new Headers(input.headers);
+  headers.set("cookie", input.cookies);
+  headers.set("content-type", "application/x-www-form-urlencoded");
+  return request(app, input.path, {
+    method: "POST",
+    host: config.publicHost,
+    headers,
+    body: new URLSearchParams({ accept: String(input.accept) }),
+    redirect: "manual",
+  });
+}
+
+export function callbackLocation(response: Response): URL | null {
+  const location = response.headers.get("location");
+  if (!location) {
+    return null;
+  }
+  if (location.startsWith("http://localhost/callback") || location.includes("/callback?")) {
+    return new URL(location, "http://localhost");
+  }
+  return null;
+}
+
+export async function exchangeAuthorizationCode(
+  app: Hono,
+  config: GatewayConfig,
+  input: { code: string; clientId: string; verifier: string },
+): Promise<Response> {
+  return request(app, "/oauth2/token", {
+    method: "POST",
+    host: config.publicHost,
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      grant_type: "authorization_code",
+      code: input.code,
+      redirect_uri: "http://localhost/callback",
+      client_id: input.clientId,
+      code_verifier: input.verifier,
+      resource: config.mcpResource,
+    }),
+  });
 }
 
 export async function getAccessToken(app: Hono, config: GatewayConfig): Promise<string> {
