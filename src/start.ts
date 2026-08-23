@@ -2,14 +2,30 @@ import { ConfigError } from "./config.js";
 import { seedAdmin } from "./seed-admin.js";
 import { startServer } from "./server.js";
 
-export function hasSeedCredentials(env: NodeJS.ProcessEnv = process.env): boolean {
-  return Boolean(env.ADMIN_EMAIL?.trim() && env.ADMIN_PASSWORD);
+export type SeedCredentialState = "none" | "partial" | "complete";
+
+export function seedCredentialState(env: NodeJS.ProcessEnv = process.env): SeedCredentialState {
+  const emailSet = Boolean(env.ADMIN_EMAIL?.trim());
+  const passwordSet = env.ADMIN_PASSWORD !== undefined && env.ADMIN_PASSWORD !== "";
+  if (emailSet && passwordSet) {
+    return "complete";
+  }
+  if (emailSet || passwordSet) {
+    return "partial";
+  }
+  return "none";
 }
 
 export async function runStartup(
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<"seeded" | "awaiting-credential-removal" | "listening"> {
-  if (hasSeedCredentials(env)) {
+  const credentials = seedCredentialState(env);
+  if (credentials === "partial") {
+    throw new ConfigError(
+      "ADMIN_EMAIL and ADMIN_PASSWORD must both be set for the one-time seed, or both be removed",
+    );
+  }
+  if (credentials === "complete") {
     try {
       const { userId } = await seedAdmin(env);
       console.log(`Administrator created. Durable user ID: ${userId}`);
