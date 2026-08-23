@@ -5,7 +5,7 @@ import { safeLog } from "./security.js";
 
 const SHUTDOWN_TIMEOUT_MS = 10_000;
 
-async function main(): Promise<void> {
+export async function startServer(): Promise<void> {
   const config = loadGatewayConfig();
   const gateway = await createGatewayApp(config, { requireSoleUser: true });
   const server = serve({
@@ -37,11 +37,18 @@ async function main(): Promise<void> {
   process.on("SIGINT", () => shutdown("SIGINT"));
 }
 
-main().catch((error: unknown) => {
-  if (error instanceof ConfigError) {
-    console.error(error.message);
-  } else {
-    console.error("Gateway failed to start");
-  }
-  process.exit(1);
-});
+function isMain(): boolean {
+  const entry = process.argv[1];
+  return Boolean(entry && import.meta.url.endsWith(entry.replace(/\\/g, "/")));
+}
+
+if (isMain() || process.argv[1]?.endsWith("server.ts") || process.argv[1]?.endsWith("server.js")) {
+  startServer().catch((error: unknown) => {
+    if (error instanceof ConfigError) {
+      console.error(error.message);
+    } else {
+      console.error("Gateway failed to start");
+    }
+    process.exit(1);
+  });
+}

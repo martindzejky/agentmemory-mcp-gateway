@@ -116,14 +116,35 @@ npm run build
 
 ## Secure one-time administrator seeding
 
-1. Generate a long random password in 1Password. Do not store it in git, SQLite, Docker, or logs.
-2. Set `ADMIN_EMAIL` and `ADMIN_PASSWORD` only in the shell or a temporary Railway variable.
-3. Run `npm run seed-admin` against the mounted `/data` volume, or `railway run npm run seed-admin` after the volume exists.
-4. The command creates the user only when the user table is empty. It refuses if any user exists.
-5. It prints the durable user ID. It never prints the password.
-6. Remove `ADMIN_PASSWORD` and `ADMIN_EMAIL` immediately.
+`railway run` only injects variables into a **local** command. It cannot write to the Railway volume. Seed inside the deployed container after `/data` is mounted.
 
-The production process will not start until that one user exists.
+### Local
+
+```sh
+npm run seed-admin
+# remove ADMIN_PASSWORD from .env
+```
+
+### Production image / Railway
+
+The image includes `dist/seed-admin.js` and starts with `node dist/start.js`.
+
+1. Generate a long random password in 1Password. Do not store it in git, SQLite, Docker, or logs.
+2. Set temporary `ADMIN_EMAIL` and `ADMIN_PASSWORD` (20+ characters) on the service.
+3. Deploy or restart so the container runs with `/data` mounted.
+4. With those variables set, `node dist/start.js` runs `node dist/seed-admin.js` in-process, prints the durable user ID, and exits `0` without opening the HTTP port.
+5. Remove `ADMIN_PASSWORD` and `ADMIN_EMAIL`, then restart. The process then serves HTTP.
+6. If the variables are still set after a user exists, startup logs that they must be removed and exits `0` so Railway does not crash-loop.
+
+Manual in-container equivalent after the volume exists:
+
+```sh
+railway ssh -- node dist/seed-admin.js
+```
+
+Do not use `railway run npm run seed-admin` for production seeding. That command runs on your machine.
+
+The production HTTP process will not start until that one user exists and the seed variables are gone.
 
 ## Docker
 
@@ -139,18 +160,19 @@ docker run --rm -p 8080:8080 \
   agentmemory-mcp-gateway
 ```
 
-The image runs as a non-root user. Mount a persistent volume at `/data`.
+The entrypoint starts as root, `chown`s the `DATABASE_PATH` directory, then drops to UID/GID `10001` before `node` runs. Mount a persistent volume at `/data`. Named volumes are also root-owned, so the same ownership fix applies.
 
 ## Railway
 
 1. Create a new service from this repository. Do not deploy onto the AgentMemory service.
 2. Use the Dockerfile / `railway.json` in the repo root.
-3. Attach a persistent volume mounted at `/data`.
-4. Set replicas to **1**. A single SQLite volume cannot be shared safely.
-5. Set the environment variables above. Use the private AgentMemory URL, such as `http://<agentmemory-service>.railway.internal:3111`.
-6. Attach the public custom domain and set `PUBLIC_URL` to that exact `https://` origin.
-7. Seed the administrator once, then delete the temporary password variable.
-8. Confirm `GET /healthz` returns `{"ok":true}`.
+3. Attach a persistent volume mounted at `/data`. Railway mounts volumes as root and replaces the image `/data` directory.
+4. Set `RAILWAY_RUN_UID=0` so the entrypoint can `chown` `/data`, then drop to UID `10001`. Leaving the process as root is a tradeoff; this image does not keep root after startup.
+5. Set replicas to **1**. A single SQLite volume cannot be shared safely.
+6. Set the environment variables above. Use the private AgentMemory URL, such as `http://<agentmemory-service>.railway.internal:3111`.
+7. Attach the public custom domain and set `PUBLIC_URL` to that exact `https://` origin.
+8. Seed the administrator once with the in-container path above, then delete the temporary password variables.
+9. Confirm `GET /healthz` returns `{"ok":true}`.
 
 Do not put AgentMemory on the public internet for this flow. The gateway is the only public MCP endpoint.
 
