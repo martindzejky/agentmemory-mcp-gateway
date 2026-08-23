@@ -51,13 +51,69 @@ function backendHeaders(secret: string, extra?: HeadersInit): Headers {
   return headers;
 }
 
-async function readLimitedJson(response: Response): Promise<unknown> {
-  const raw = await response.arrayBuffer();
-  if (raw.byteLength > MAX_UPSTREAM_BYTES) {
+function declaredContentLength(response: Response): number | undefined {
+  const raw = response.headers.get("content-length");
+  if (raw === null) {
+    return undefined;
+  }
+  const length = Number(raw);
+  if (!Number.isFinite(length) || length < 0) {
+    return Number.POSITIVE_INFINITY;
+  }
+  return length;
+}
+
+async function cancelBody(response: Response): Promise<void> {
+  try {
+    await response.body?.cancel();
+  } catch {
+    // The upstream stream may already be closed.
+  }
+}
+
+export async function readLimitedJson(response: Response): Promise<unknown> {
+  const declared = declaredContentLength(response);
+  if (declared !== undefined && declared > MAX_UPSTREAM_BYTES) {
+    await cancelBody(response);
     throw new AgentMemoryError(UPSTREAM_INVALID);
   }
+
+  const reader = response.body?.getReader();
+  if (!reader) {
+    throw new AgentMemoryError(UPSTREAM_INVALID);
+  }
+
+  const chunks: Uint8Array[] = [];
+  let total = 0;
   try {
-    return JSON.parse(new TextDecoder().decode(raw)) as unknown;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+      total += value.byteLength;
+      if (total > MAX_UPSTREAM_BYTES) {
+        await reader.cancel();
+        throw new AgentMemoryError(UPSTREAM_INVALID);
+      }
+      chunks.push(value);
+    }
+  } catch (error) {
+    if (error instanceof AgentMemoryError) {
+      throw error;
+    }
+    throw new AgentMemoryError(UPSTREAM_UNAVAILABLE);
+  }
+
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+
+  try {
+    return JSON.parse(new TextDecoder().decode(bytes)) as unknown;
   } catch {
     throw new AgentMemoryError(UPSTREAM_INVALID);
   }
