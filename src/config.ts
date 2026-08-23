@@ -1,4 +1,7 @@
+import { dirname, isAbsolute, resolve } from "node:path";
+
 const DEFAULT_ALLOWED_TOOLS = ["memory_recall", "memory_smart_search", "memory_save"] as const;
+const DEFAULT_VOLUME_MOUNT = "/data";
 const DEFAULT_PORT = 8080;
 const MIN_SECRET_LENGTH = 32;
 const MIN_ADMIN_PASSWORD_LENGTH = 20;
@@ -122,6 +125,28 @@ function assertSecret(name: string, value: string): void {
   }
 }
 
+export function assertSafeDatabasePath(
+  raw: string,
+  options: { isProduction: boolean; volumeMount?: string } = { isProduction: false },
+): string {
+  const trimmed = raw.trim();
+  if (!trimmed || !isAbsolute(trimmed)) {
+    throw new ConfigError("DATABASE_PATH must be an absolute file path");
+  }
+  const resolved = resolve(trimmed);
+  const parent = dirname(resolved);
+  if (parent === "/" || parent === resolved) {
+    throw new ConfigError("DATABASE_PATH must not use the filesystem root as its parent");
+  }
+  if (options.isProduction) {
+    const mount = resolve(options.volumeMount?.trim() || DEFAULT_VOLUME_MOUNT);
+    if (mount === "/" || resolved === mount || !resolved.startsWith(`${mount}/`)) {
+      throw new ConfigError(`DATABASE_PATH must be a file under ${mount}`);
+    }
+  }
+  return resolved;
+}
+
 export function loadGatewayConfig(env: NodeJS.ProcessEnv = process.env): GatewayConfig {
   const publicUrl = normalizePublicUrl(required("PUBLIC_URL", env.PUBLIC_URL));
   const betterAuthSecret = required("BETTER_AUTH_SECRET", env.BETTER_AUTH_SECRET);
@@ -140,7 +165,10 @@ export function loadGatewayConfig(env: NodeJS.ProcessEnv = process.env): Gateway
     publicHost: publicUrl.host,
     mcpResource: `${publicUrl.origin}/mcp`,
     betterAuthSecret,
-    databasePath: required("DATABASE_PATH", env.DATABASE_PATH),
+    databasePath: assertSafeDatabasePath(required("DATABASE_PATH", env.DATABASE_PATH), {
+      isProduction,
+      volumeMount: env.RAILWAY_VOLUME_MOUNT_PATH,
+    }),
     agentmemoryUrl: normalizeAgentmemoryUrl(required("AGENTMEMORY_URL", env.AGENTMEMORY_URL)),
     agentmemorySecret,
     allowedTools: parseAllowedTools(env.ALLOWED_TOOLS),

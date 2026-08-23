@@ -134,7 +134,8 @@ The image includes `dist/seed-admin.js` and starts with `node dist/start.js`.
 3. Deploy or restart so the container runs with `/data` mounted.
 4. With those variables set, `node dist/start.js` runs `node dist/seed-admin.js` in-process, prints the durable user ID, and exits `0` without opening the HTTP port.
 5. Remove `ADMIN_PASSWORD` and `ADMIN_EMAIL`, then restart. The process then serves HTTP.
-6. If the variables are still set after a user exists, startup logs that they must be removed and exits `0` so Railway does not crash-loop.
+6. If both variables are still set after a user exists, startup logs that they must be removed and exits `0` so Railway does not crash-loop.
+7. If only one of `ADMIN_EMAIL` or `ADMIN_PASSWORD` is set, startup fails closed and does not serve HTTP.
 
 Manual in-container equivalent after the volume exists:
 
@@ -160,7 +161,7 @@ docker run --rm -p 8080:8080 \
   agentmemory-mcp-gateway
 ```
 
-The entrypoint starts as root, `chown`s the `DATABASE_PATH` directory, then drops to UID/GID `10001` before `node` runs. Mount a persistent volume at `/data`. Named volumes are also root-owned, so the same ownership fix applies.
+The entrypoint starts as root, verifies `DATABASE_PATH` is an absolute file under `/data` (or `RAILWAY_VOLUME_MOUNT_PATH`), `chown`s only that directory plus the SQLite/WAL/SHM files, then drops to UID/GID `10001` before `node` runs. It never recursively `chown`s `/` or other parents. Mount a persistent volume at `/data`.
 
 ## Railway
 
