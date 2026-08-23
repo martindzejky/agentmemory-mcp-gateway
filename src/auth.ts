@@ -26,6 +26,11 @@ const BLOCKED_AUTH_PATHS = [
 export interface AuthFactoryOptions {
   allowUserCreation?: boolean;
   requireSoleUser?: boolean;
+  /**
+   * Force Better Auth origin and CSRF checks even when NODE_ENV=test.
+   * Does not disable those checks; it overrides the library's test skip.
+   */
+  productionOriginChecks?: boolean;
 }
 
 type AuthInstance = ReturnType<typeof createBetterAuth>["auth"];
@@ -64,6 +69,9 @@ function createBetterAuth(
     advanced: {
       useSecureCookies: config.isProduction || config.publicUrl.startsWith("https://"),
       trustedProxyHeaders: config.trustedProxyHeaders,
+      ...(options.productionOriginChecks === true
+        ? { disableOriginCheck: false, disableCSRFCheck: false }
+        : {}),
     },
     databaseHooks: {
       user: {

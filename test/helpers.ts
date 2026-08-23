@@ -192,6 +192,7 @@ export async function startGateway(
     seed?: boolean;
     mock?: MockAgentMemory;
     trustedProxyHeaders?: boolean;
+    productionOriginChecks?: boolean;
   } = {},
 ): Promise<{
   env: NodeJS.ProcessEnv;
@@ -216,6 +217,7 @@ export async function startGateway(
   const mock = options.mock ?? createMockAgentMemory();
   const gateway = await createGatewayApp(config, {
     requireSoleUser: options.seed !== false,
+    productionOriginChecks: options.productionOriginChecks,
     agentMemoryRequestLog: [],
   });
   const restoreFetch = installFetchBridge(gateway.app, config, mock);
@@ -263,6 +265,134 @@ export async function signIn(app: Hono, config: GatewayConfig, query = ""): Prom
   return collectCookies(response);
 }
 
+export function extractConsentCsrf(html: string): string {
+  return html.match(/name="csrf" value="([^"]*)"/)?.[1] ?? "";
+}
+
+export async function prepareConsentFlow(
+  app: Hono,
+  config: GatewayConfig,
+): Promise<{
+  clientId: string;
+  verifier: string;
+  cookies: string;
+  consentPath: string;
+  consentQuery: string;
+  csrf: string;
+}> {
+  const client = await registerClient(app, config);
+  const { verifier, challenge } = pkce();
+  const authorizeQuery = new URLSearchParams({
+    response_type: "code",
+    client_id: client.client_id,
+    redirect_uri: "http://localhost/callback",
+    scope: "openid profile offline_access mcp:tools",
+    code_challenge: challenge,
+    code_challenge_method: "S256",
+    resource: config.mcpResource,
+    state: "test-state",
+  });
+
+  let cookies = await signIn(app, config, authorizeQuery.toString());
+  let location: string | null = `/oauth2/authorize?${authorizeQuery}`;
+
+  for (let i = 0; i < 8 && location; i += 1) {
+    const current = new URL(location, config.publicUrl);
+    if (current.pathname === "/consent") {
+      const consentPath = `${current.pathname}${current.search}`;
+      const consentQuery = current.search.startsWith("?")
+        ? current.search.slice(1)
+        : current.search;
+      const page = await request(app, consentPath, {
+        method: "GET",
+        host: config.publicHost,
+        headers: { cookie: cookies },
+        redirect: "manual",
+      });
+      cookies = collectCookies(page, cookies);
+      return {
+        clientId: client.client_id,
+        verifier,
+        cookies,
+        consentPath,
+        consentQuery,
+        csrf: extractConsentCsrf(await page.text()),
+      };
+    }
+    const response = await request(app, `${current.pathname}${current.search}`, {
+      method: "GET",
+      host: config.publicHost,
+      headers: { cookie: cookies },
+      redirect: "manual",
+    });
+    cookies = collectCookies(response, cookies);
+    location = response.headers.get("location");
+    if (location?.startsWith("http://localhost/callback") || location?.includes("/callback?")) {
+      throw new Error(`Reached client callback before consent: ${location}`);
+    }
+  }
+
+  throw new Error("Unable to reach the consent screen");
+}
+
+export async function postConsent(
+  app: Hono,
+  config: GatewayConfig,
+  input: {
+    path: string;
+    cookies: string;
+    accept: boolean;
+    headers?: HeadersInit;
+    csrf?: string;
+  },
+): Promise<Response> {
+  const headers = new Headers(input.headers);
+  headers.set("cookie", input.cookies);
+  headers.set("content-type", "application/x-www-form-urlencoded");
+  const body = new URLSearchParams({ accept: String(input.accept) });
+  if (input.csrf) {
+    body.set("csrf", input.csrf);
+  }
+  return request(app, input.path, {
+    method: "POST",
+    host: config.publicHost,
+    headers,
+    body,
+    redirect: "manual",
+  });
+}
+
+export function callbackLocation(response: Response): URL | null {
+  const location = response.headers.get("location");
+  if (!location) {
+    return null;
+  }
+  if (location.startsWith("http://localhost/callback") || location.includes("/callback?")) {
+    return new URL(location, "http://localhost");
+  }
+  return null;
+}
+
+export async function exchangeAuthorizationCode(
+  app: Hono,
+  config: GatewayConfig,
+  input: { code: string; clientId: string; verifier: string },
+): Promise<Response> {
+  return request(app, "/oauth2/token", {
+    method: "POST",
+    host: config.publicHost,
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      grant_type: "authorization_code",
+      code: input.code,
+      redirect_uri: "http://localhost/callback",
+      client_id: input.clientId,
+      code_verifier: input.verifier,
+      resource: config.mcpResource,
+    }),
+  });
+}
+
 export async function getAccessToken(app: Hono, config: GatewayConfig): Promise<string> {
   const client = await registerClient(app, config);
   const { verifier, challenge } = pkce();
@@ -279,13 +409,12 @@ export async function getAccessToken(app: Hono, config: GatewayConfig): Promise<
 
   let cookies = await signIn(app, config, authorizeQuery.toString());
   let location: string | null = `/oauth2/authorize?${authorizeQuery}`;
+  let csrf = "";
   const trace: string[] = [];
 
   for (let i = 0; i < 8 && location; i += 1) {
-    const current = new URL(location, config.publicUrl);
-    const isConsentPost =
-      current.pathname === "/consent" && i > 0 && current.search.includes("client_id");
-    const method = current.pathname === "/consent" ? (isConsentPost ? "POST" : "GET") : "GET";
+    const current: URL = new URL(location, config.publicUrl);
+    const method = current.pathname === "/consent" && csrf ? "POST" : "GET";
     const response = await request(app, `${current.pathname}${current.search}`, {
       method,
       host: config.publicHost,
@@ -293,12 +422,18 @@ export async function getAccessToken(app: Hono, config: GatewayConfig): Promise<
         cookie: cookies,
         ...(method === "POST" ? { "content-type": "application/x-www-form-urlencoded" } : {}),
       },
-      body: method === "POST" ? new URLSearchParams({ accept: "true" }) : undefined,
+      body: method === "POST" ? new URLSearchParams({ accept: "true", csrf }) : undefined,
       redirect: "manual",
     });
     cookies = collectCookies(response, cookies);
     let nextLocation = response.headers.get("location");
     const preview = await response.clone().text();
+    if (method === "GET" && current.pathname === "/consent") {
+      csrf = extractConsentCsrf(preview);
+      if (csrf && !nextLocation) {
+        nextLocation = `${current.pathname}${current.search}`;
+      }
+    }
     if (!nextLocation && preview.includes("http://localhost/callback")) {
       try {
         const body = JSON.parse(preview) as { url?: string; redirect_uri?: string };
