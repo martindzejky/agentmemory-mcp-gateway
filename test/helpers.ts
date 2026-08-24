@@ -155,6 +155,58 @@ export function installFetchBridge(
   };
 }
 
+export interface CapturedLogs {
+  /** Every captured console line, with the stream it was written to. */
+  lines: Array<{ level: "info" | "error"; text: string }>;
+  /** Parsed structured gateway log entries, optionally filtered by event. */
+  entries(event?: string): Array<Record<string, unknown>>;
+  /** Every captured line joined, for "must not contain" assertions. */
+  text(): string;
+  restore(): void;
+}
+
+export function captureLogs(): CapturedLogs {
+  const originalInfo = console.info;
+  const originalError = console.error;
+  const lines: Array<{ level: "info" | "error"; text: string }> = [];
+  const record = (level: "info" | "error") => {
+    return (...args: unknown[]) => {
+      lines.push({ level, text: args.map((arg) => String(arg)).join(" ") });
+    };
+  };
+  console.info = record("info");
+  console.error = record("error");
+
+  return {
+    lines,
+    entries(event) {
+      return lines.flatMap(({ text }) => {
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(text);
+        } catch {
+          return [];
+        }
+        if (typeof parsed !== "object" || parsed === null) {
+          return [];
+        }
+        const entry = parsed as Record<string, unknown>;
+        if (entry.log !== "mcp" || (event !== undefined && entry.event !== event)) {
+          return [];
+        }
+        return [entry];
+      });
+    },
+    text() {
+      return lines.map(({ text }) => text).join("\n");
+    },
+    restore() {
+      console.info = originalInfo;
+      console.error = originalError;
+    },
+  };
+}
+
 export async function request(
   app: Hono,
   path: string,
@@ -497,6 +549,7 @@ export async function mcpRequest(
   method: string,
   params: Record<string, unknown> = {},
   accessToken?: string,
+  extraHeaders: Record<string, string> = {},
 ) {
   return request(app, "/mcp", {
     method: "POST",
@@ -507,7 +560,29 @@ export async function mcpRequest(
       ...(accessToken
         ? { authorization: `Bearer ${accessToken}` }
         : { authorization: `Bearer ${CLIENT_TOKEN}` }),
+      ...extraHeaders,
     },
     body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+  });
+}
+
+/** Posts a raw JSON-RPC envelope, for shapes `mcpRequest` cannot express. */
+export async function mcpRawRequest(
+  app: Hono,
+  config: GatewayConfig,
+  body: string,
+  accessToken: string,
+  extraHeaders: Record<string, string> = {},
+) {
+  return request(app, "/mcp", {
+    method: "POST",
+    host: config.publicHost,
+    headers: {
+      "content-type": "application/json",
+      accept: "application/json, text/event-stream",
+      authorization: `Bearer ${accessToken}`,
+      ...extraHeaders,
+    },
+    body,
   });
 }
