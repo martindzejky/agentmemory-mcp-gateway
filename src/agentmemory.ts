@@ -5,6 +5,7 @@ import {
   UPSTREAM_UNAVAILABLE,
 } from "./errors.js";
 import type { GatewayConfig } from "./config.js";
+import { describeError, elapsedMs, logMcpEvent } from "./mcp-log.js";
 
 const UPSTREAM_TIMEOUT_MS = 10_000;
 const MAX_UPSTREAM_BYTES = 2 * 1024 * 1024;
@@ -179,54 +180,94 @@ export function createAgentMemoryClient(
   return {
     allowedTools,
     async listTools() {
-      const response = await fetchUpstream(
-        `${config.agentmemoryUrl}/agentmemory/mcp/tools`,
-        { method: "GET" },
-        config.agentmemorySecret,
-        options.requestLog,
-      );
-      if (!response.ok) {
-        throw new AgentMemoryError(UPSTREAM_UNAVAILABLE);
+      const startedAt = performance.now();
+      logMcpEvent("info", "agentmemory.list_tools.started");
+      let upstreamStatus: number | undefined;
+      try {
+        const response = await fetchUpstream(
+          `${config.agentmemoryUrl}/agentmemory/mcp/tools`,
+          { method: "GET" },
+          config.agentmemorySecret,
+          options.requestLog,
+        );
+        upstreamStatus = response.status;
+        if (!response.ok) {
+          throw new AgentMemoryError(UPSTREAM_UNAVAILABLE);
+        }
+        const body = await readLimitedJson(response);
+        const tools = isObject(body) && Array.isArray(body.tools) ? body.tools : null;
+        if (!tools) {
+          throw new AgentMemoryError(UPSTREAM_INVALID);
+        }
+        const allowed = tools
+          .map(validateTool)
+          .filter((tool): tool is AgentMemoryTool => tool !== null && allowedTools.has(tool.name));
+        logMcpEvent("info", "agentmemory.list_tools.succeeded", {
+          upstreamStatus,
+          durationMs: elapsedMs(startedAt),
+          toolCount: allowed.length,
+          toolNames: allowed.map((tool) => tool.name),
+        });
+        return allowed;
+      } catch (error) {
+        logMcpEvent("error", "agentmemory.list_tools.failed", {
+          upstreamStatus,
+          durationMs: elapsedMs(startedAt),
+          ...describeError(error),
+        });
+        throw error;
       }
-      const body = await readLimitedJson(response);
-      const tools = isObject(body) && Array.isArray(body.tools) ? body.tools : null;
-      if (!tools) {
-        throw new AgentMemoryError(UPSTREAM_INVALID);
-      }
-      return tools
-        .map(validateTool)
-        .filter((tool): tool is AgentMemoryTool => tool !== null && allowedTools.has(tool.name));
     },
     async callTool(name, args) {
       if (!allowedTools.has(name)) {
         throw new AgentMemoryError(TOOL_NOT_ALLOWED);
       }
-      const response = await fetchUpstream(
-        `${config.agentmemoryUrl}/agentmemory/mcp/call`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ name, arguments: args }),
-        },
-        config.agentmemorySecret,
-        options.requestLog,
-      );
-      if (!response.ok) {
-        throw new AgentMemoryError(UPSTREAM_UNAVAILABLE);
+      const startedAt = performance.now();
+      logMcpEvent("info", "agentmemory.call_tool.started", { toolName: name });
+      let upstreamStatus: number | undefined;
+      try {
+        const response = await fetchUpstream(
+          `${config.agentmemoryUrl}/agentmemory/mcp/call`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ name, arguments: args }),
+          },
+          config.agentmemorySecret,
+          options.requestLog,
+        );
+        upstreamStatus = response.status;
+        if (!response.ok) {
+          throw new AgentMemoryError(UPSTREAM_UNAVAILABLE);
+        }
+        const body = await readLimitedJson(response);
+        if (!isObject(body)) {
+          throw new AgentMemoryError(UPSTREAM_INVALID);
+        }
+        if (!Array.isArray(body.content) || !body.content.every(isObject)) {
+          throw new AgentMemoryError(UPSTREAM_INVALID);
+        }
+        logMcpEvent("info", "agentmemory.call_tool.succeeded", {
+          toolName: name,
+          upstreamStatus,
+          durationMs: elapsedMs(startedAt),
+          toolReportedError: body.isError === true,
+        });
+        return {
+          content: body.content as AgentMemoryContentBlock[],
+          isError: body.isError === true,
+          structuredContent: body.structuredContent,
+          _meta: isObject(body._meta) ? body._meta : undefined,
+        };
+      } catch (error) {
+        logMcpEvent("error", "agentmemory.call_tool.failed", {
+          toolName: name,
+          upstreamStatus,
+          durationMs: elapsedMs(startedAt),
+          ...describeError(error),
+        });
+        throw error;
       }
-      const body = await readLimitedJson(response);
-      if (!isObject(body)) {
-        throw new AgentMemoryError(UPSTREAM_INVALID);
-      }
-      if (!Array.isArray(body.content) || !body.content.every(isObject)) {
-        throw new AgentMemoryError(UPSTREAM_INVALID);
-      }
-      return {
-        content: body.content as AgentMemoryContentBlock[],
-        isError: body.isError === true,
-        structuredContent: body.structuredContent,
-        _meta: isObject(body._meta) ? body._meta : undefined,
-      };
     },
   };
 }

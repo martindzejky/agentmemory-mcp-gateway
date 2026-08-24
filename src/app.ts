@@ -11,6 +11,7 @@ import {
   verifyConsentCsrfToken,
 } from "./consent-csrf.js";
 import { GENERIC_FORBIDDEN } from "./errors.js";
+import { describeError, logMcpEvent } from "./mcp-log.js";
 import { createMcpRouteHandler } from "./mcp.js";
 import { consentPage, loginPage } from "./pages.js";
 import {
@@ -222,10 +223,14 @@ export async function createGatewayApp(
 
   app.all("/*", (c) => gatewayAuth.auth.handler(c.req.raw));
 
-  app.onError((_error, c) => {
+  app.onError((error, c) => {
     if (c.req.path === "/sign-in") {
       return c.html(loginPage(queryString(new URL(c.req.url)), true), 401);
     }
+    logMcpEvent("error", "gateway.unhandled_error", {
+      path: c.req.path,
+      ...describeError(error),
+    });
     return c.json({ error: GENERIC_FORBIDDEN }, 500);
   });
 
