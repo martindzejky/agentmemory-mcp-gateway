@@ -1,4 +1,4 @@
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { cors } from "hono/cors";
 import { secureHeaders } from "hono/secure-headers";
@@ -7,14 +7,18 @@ import { createGatewayAuth, isAdminSubject, type GatewayAuth } from "./auth.js";
 import type { GatewayConfig } from "./config.js";
 import {
   createConsentCsrfToken,
-  evaluateConsentTrust,
-  trustedInternalConsentHeaders,
+  internalConsentHeaders,
   verifyConsentCsrfToken,
-} from "./consent-origin.js";
+} from "./consent-csrf.js";
 import { GENERIC_FORBIDDEN } from "./errors.js";
 import { createMcpRouteHandler } from "./mcp.js";
 import { consentPage, loginPage } from "./pages.js";
-import { blockUserManagement, rateLimitSensitiveRoutes, validateHost } from "./security.js";
+import {
+  blockUserManagement,
+  rateLimitSensitiveRoutes,
+  safeLog,
+  validateHost,
+} from "./security.js";
 
 export interface GatewayAppOptions {
   allowUserCreation?: boolean;
@@ -33,6 +37,15 @@ export interface GatewayApp {
 
 function queryString(url: URL): string {
   return url.search.startsWith("?") ? url.search.slice(1) : url.search;
+}
+
+/** Coarse reason for a rejected hosted consent POST. Never includes values. */
+type ConsentRejection =
+  "session_missing" | "csrf_missing" | "csrf_malformed" | "csrf_expired" | "csrf_invalid";
+
+function denyConsent(c: Context, reason: ConsentRejection) {
+  safeLog("hosted consent rejected", { reason });
+  return c.json({ error: GENERIC_FORBIDDEN }, 403);
 }
 
 function cookieHeader(headers: Headers): string | null {
@@ -132,51 +145,49 @@ export async function createGatewayApp(
   app.get("/consent", async (c) => {
     const query = queryString(new URL(c.req.url));
     const session = await gatewayAuth.auth.api.getSession({ headers: c.req.raw.headers });
-    const csrf = session
-      ? createConsentCsrfToken({
-          secret: config.betterAuthSecret,
-          sessionId: session.session.id,
-          oauthQuery: query,
-        })
-      : "";
+    if (!session) {
+      return c.redirect(`/sign-in?${query}`, 303);
+    }
     return c.html(
       consentPage({
         query,
         clientId: c.req.query("client_id") ?? "",
         scope: c.req.query("scope") ?? "",
-        csrf,
+        csrf: createConsentCsrfToken({
+          secret: config.betterAuthSecret,
+          sessionId: session.session.id,
+          oauthQuery: query,
+        }),
       }),
     );
   });
 
   app.post("/consent", async (c) => {
     const url = new URL(c.req.url);
-    const form = await c.req.parseBody();
     const oauthQuery = queryString(url);
-    const trust = evaluateConsentTrust(c.req.raw.headers, config.publicOrigin);
-    if (trust === "deny") {
-      return c.json({ error: GENERIC_FORBIDDEN }, 403);
+    const session = await gatewayAuth.auth.api.getSession({ headers: c.req.raw.headers });
+    if (!session) {
+      return denyConsent(c, "session_missing");
     }
-    if (trust === "csrf") {
-      const session = await gatewayAuth.auth.api.getSession({ headers: c.req.raw.headers });
-      const token = typeof form.csrf === "string" ? form.csrf : "";
-      const csrfOk =
-        !!session &&
-        verifyConsentCsrfToken({
-          secret: config.betterAuthSecret,
-          sessionId: session.session.id,
-          oauthQuery,
-          token,
-        });
-      if (!csrfOk) {
-        return c.json({ error: GENERIC_FORBIDDEN }, 403);
-      }
+    const form = await c.req.parseBody();
+    const token = typeof form.csrf === "string" ? form.csrf.trim() : "";
+    if (!token) {
+      return denyConsent(c, "csrf_missing");
+    }
+    const csrf = verifyConsentCsrfToken({
+      secret: config.betterAuthSecret,
+      sessionId: session.session.id,
+      oauthQuery,
+      token,
+    });
+    if (csrf !== "valid") {
+      return denyConsent(c, `csrf_${csrf}`);
     }
     const accept = form.accept === "true";
     const response = await gatewayAuth.auth.handler(
       new Request(new URL("/oauth2/consent", config.publicUrl), {
         method: "POST",
-        headers: trustedInternalConsentHeaders(c.req.raw.headers, config.publicOrigin),
+        headers: internalConsentHeaders(c.req.header("cookie") ?? null, config.publicOrigin),
         body: JSON.stringify({
           accept,
           scope: url.searchParams.get("scope") ?? undefined,

@@ -74,6 +74,14 @@ The in-memory rate limiter is also single-replica only. Do not scale this servic
 
 Authentication errors are generic. They do not disclose whether an email exists.
 
+## Hosted consent CSRF
+
+`GET /consent` requires an authenticated session and renders a short-lived HMAC token into both the Allow and Deny forms. The token is bound to the session ID, the exact raw signed OAuth query, an expiry, and a consent-CSRF domain marker.
+
+`POST /consent` accepts nothing else as proof. A missing, malformed, expired, forged, wrong-session, or wrong-query token returns `403 {"error":"Request denied"}` and logs only a coarse reason such as `csrf_expired`. Browser `Origin`, `Referer`, and Fetch Metadata headers are neither trusted nor required, because hosted authentication windows (Safari in particular) send `Origin: null` and cross-site Fetch Metadata for a legitimate same-page form post.
+
+After the token verifies, the gateway forwards the submission to Better Auth's `/oauth2/consent` with `Origin` pinned to `PUBLIC_URL`. Better Auth's own origin, CSRF, and signed-OAuth-query checks stay enabled, so a direct call to `/oauth2/consent` is still rejected.
+
 ## Environment
 
 | Variable             | Required  | Purpose                                                                                   |

@@ -269,6 +269,18 @@ export function extractConsentCsrf(html: string): string {
   return html.match(/name="csrf" value="([^"]*)"/)?.[1] ?? "";
 }
 
+export function extractConsentCsrfFields(html: string): string[] {
+  return [...html.matchAll(/name="csrf" value="([^"]*)"/g)].map((match) => match[1] ?? "");
+}
+
+export async function currentSessionId(gateway: GatewayApp, cookies: string): Promise<string> {
+  const session = await gateway.auth.api.getSession({ headers: new Headers({ cookie: cookies }) });
+  if (!session) {
+    throw new Error("Expected an authenticated session");
+  }
+  return session.session.id;
+}
+
 export async function prepareConsentFlow(
   app: Hono,
   config: GatewayConfig,
