@@ -21,6 +21,17 @@ function dockerAvailable(): boolean {
   return spawnSync("docker", ["info"], { encoding: "utf8" }).status === 0;
 }
 
+function fileOwnership(path: string): string {
+  let result = spawnSync("stat", ["-c", "%u:%g", path], { encoding: "utf8" });
+  if (result.status !== 0) {
+    result = spawnSync("sudo", ["stat", "-c", "%u:%g", path], { encoding: "utf8" });
+  }
+  if (result.status !== 0) {
+    throw new Error(result.stderr || `stat failed for ${path}`);
+  }
+  return result.stdout.trim();
+}
+
 describe("database path validation", () => {
   it("rejects a database file whose parent is /", () => {
     const result = runValidate({
@@ -116,9 +127,6 @@ describe("entrypoint docker fixture", () => {
     expect(run.stderr).toBe("");
     expect(run.status).toBe(0);
     expect(run.stdout.trim()).toBe("10001");
-    const stat = spawnSync("stat", ["-c", "%u:%g", join(mount, "oauth.sqlite")], {
-      encoding: "utf8",
-    });
-    expect(stat.stdout.trim()).toBe("10001:10001");
+    expect(fileOwnership(join(mount, "oauth.sqlite"))).toBe("10001:10001");
   });
 });
