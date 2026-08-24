@@ -217,6 +217,32 @@ curl -sS -D- https://<your-domain>/mcp \
 
 The `/mcp` call must return `401` with a `WWW-Authenticate` challenge that points at protected-resource metadata. After a real client login, `tools/list` must show only the allowlisted tools.
 
+## MCP diagnostic logs
+
+Railway shows HTTP status codes only, and MCP answers most protocol failures with `HTTP 200` and a JSON-RPC error inside the body. Every `/mcp` exchange therefore writes one-line JSON to stdout, or stderr when it failed:
+
+```text
+{"log":"mcp","ts":"...","event":"mcp.request","httpMethod":"POST","userAgent":"openai-mcp/1.0.0","envelope":"request","mcpMethod":"tools/list","rpcId":"2"}
+{"log":"mcp","ts":"...","event":"agentmemory.list_tools.succeeded","upstreamStatus":200,"durationMs":2,"toolCount":3,"toolNames":["memory_recall","memory_smart_search","memory_save"]}
+{"log":"mcp","ts":"...","event":"mcp.response","httpMethod":"POST","userAgent":"openai-mcp/1.0.0","envelope":"request","mcpMethod":"tools/list","rpcId":"2","httpStatus":200,"durationMs":4,"toolCount":3,"toolNames":["memory_recall","memory_smart_search","memory_save"]}
+```
+
+Filter Railway logs on `"log":"mcp"`. Useful events:
+
+| Event                                    | Meaning                                                            |
+| ---------------------------------------- | ------------------------------------------------------------------ |
+| `mcp.request`                            | An exchange started: MCP method, JSON-RPC id, envelope kind, agent |
+| `mcp.response`                           | It finished: HTTP status, duration, and safe per-method detail     |
+| `mcp.exception`                          | It threw instead of answering                                      |
+| `mcp.sdk_error` / `mcp.server_error`     | The MCP SDK reported an out-of-band or protocol error              |
+| `mcp.tools_list_failed`                  | The `tools/list` bridge handler threw, with stack and cause        |
+| `mcp.tool_call_failed`                   | The `tools/call` bridge handler threw, with stack and cause        |
+| `agentmemory.*.started/succeeded/failed` | Upstream AgentMemory call, with its HTTP status                    |
+
+`mcp.response` adds the negotiated `protocolVersion` and advertised `capabilities` for `initialize`, `toolCount` plus `toolNames` for `tools/list`, and `rpcErrorCode` plus `rpcErrorMessage` whenever the body carries a JSON-RPC error. A `-32601 Method not found` line names the exact MCP method a client wanted but this gateway does not implement.
+
+`src/mcp-log.ts` is the only writer. It accepts strings, numbers, booleans, and string arrays; anything else logs as `[unsupported]`. Field names that could carry a credential log as `[redacted]`, values are run through the same redaction as `safeLog`, and long values are truncated. Authorization headers, tokens, cookies, OAuth codes, tool arguments, tool results, memory contents, and request or response bodies are never logged.
+
 ## Revoking clients and tokens
 
 SQLite is the source of truth for OAuth clients, refresh tokens, and consent.
