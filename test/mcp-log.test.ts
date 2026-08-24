@@ -6,6 +6,7 @@ import {
   type McpLogField,
 } from "../src/mcp-log.js";
 import { instrumentExchange } from "../src/mcp.js";
+import { redactValue } from "../src/security.js";
 import {
   ADMIN_PASSWORD,
   AUTH_SECRET,
@@ -15,6 +16,7 @@ import {
   getAccessToken,
   mcpRawRequest,
   mcpRequest,
+  request,
   startGateway,
   type CapturedLogs,
 } from "./helpers.js";
@@ -240,6 +242,47 @@ describe("diagnostics never disturb the client response", () => {
       mcpMethod: "tools/list",
       errorMessage: "handler exploded",
     });
+  });
+});
+
+describe("non-MCP route exceptions", () => {
+  // Not keyword-shaped, so redactValue cannot save us. Only withholding the
+  // message and stack keeps a value like this out of the logs.
+  const SENTINEL = "7EWcMQHTb0YVbZVS3eCtTS8PgnSHsZ0R";
+
+  it("logs no exception detail for a route that handles credentials", async () => {
+    const ctx = await startGateway();
+    restore = ctx.restoreFetch;
+    close = () => ctx.gateway.close();
+    expect(redactValue(SENTINEL)).toBe(SENTINEL);
+
+    logs = captureLogs();
+    const original = ctx.gateway.auth.handler;
+    ctx.gateway.auth.handler = async () => {
+      throw new Error(`invalid grant ${SENTINEL}`);
+    };
+    try {
+      const response = await request(ctx.gateway.app, "/oauth2/token", {
+        method: "POST",
+        host: ctx.config.publicHost,
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({ grant_type: "authorization_code" }),
+      });
+      expect(response.status).toBe(500);
+      await expect(response.json()).resolves.toEqual({ error: "Request denied" });
+    } finally {
+      ctx.gateway.auth.handler = original;
+    }
+
+    // An exact match proves no errorMessage, stack, or causeMessage slipped in.
+    expect(lastEntry(logs, "gateway.unhandled_error")).toEqual({
+      log: "mcp",
+      ts: expect.any(String),
+      event: "gateway.unhandled_error",
+      path: "/oauth2/token",
+      errorName: "Error",
+    });
+    expect(logs.text()).not.toContain(SENTINEL);
   });
 });
 
