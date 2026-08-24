@@ -5,7 +5,8 @@
   "type": "module",
   "description": "Single-user OAuth MCP gateway for AgentMemory",
   "engines": {
-    "node": ">=22.14.0"
+    "node": ">=24.0.0",
+    "npm": ">=11.3.0"
   },
   "scripts": {
     "dev": "tsx watch src/server.ts",

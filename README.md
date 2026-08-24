@@ -243,7 +243,7 @@ Copy `/data/oauth.sqlite` and the `-wal`/`-shm` files together while the service
 
 Cursor Cloud uses `.cursor/environment.json`:
 
-- **Dockerfile** — Ubuntu 24.04, Node 24 (nvm), npm, and [agentfiles](https://github.com/martindzejky/agentfiles)
+- **Dockerfile** — Ubuntu 24.04, Node 24 (nvm) with npm 11, and [agentfiles](https://github.com/martindzejky/agentfiles)
 - **install** — refreshes agentfiles and runs `npm ci` when `package-lock.json` exists
 
-Local development uses the same Node version via `.nvmrc` for the cloud image. The gateway runtime itself targets Node 22.
+Local development, CI, Docker, and the gateway runtime all use Node 24 and npm 11. `.nvmrc` is `24`.
