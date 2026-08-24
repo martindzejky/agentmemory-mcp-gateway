@@ -11,6 +11,7 @@ import {
   verifyConsentCsrfToken,
 } from "./consent-csrf.js";
 import { GENERIC_FORBIDDEN } from "./errors.js";
+import { logMcpEvent } from "./mcp-log.js";
 import { createMcpRouteHandler } from "./mcp.js";
 import { consentPage, loginPage } from "./pages.js";
 import {
@@ -222,10 +223,18 @@ export async function createGatewayApp(
 
   app.all("/*", (c) => gatewayAuth.auth.handler(c.req.raw));
 
-  app.onError((_error, c) => {
+  app.onError((error, c) => {
     if (c.req.path === "/sign-in") {
       return c.html(loginPage(queryString(new URL(c.req.url)), true), 401);
     }
+    // Path and error name only. An exception raised on an OAuth route can carry a
+    // bare code, session value, or token in its message or stack, and redactValue
+    // only catches keyword-shaped values. Detailed MCP exception logging stays in
+    // the /mcp instrumentation, which reports before rethrowing to this handler.
+    logMcpEvent("error", "gateway.unhandled_error", {
+      path: c.req.path,
+      errorName: error instanceof Error ? error.name : "NonError",
+    });
     return c.json({ error: GENERIC_FORBIDDEN }, 500);
   });
 
