@@ -5,6 +5,7 @@ import {
   summarizeMcpResult,
   type McpLogField,
 } from "../src/mcp-log.js";
+import { instrumentExchange } from "../src/mcp.js";
 import {
   ADMIN_PASSWORD,
   AUTH_SECRET,
@@ -175,6 +176,70 @@ describe("MCP envelope and result summaries", () => {
     expect(
       summarizeMcpResult('{"error":{"code":-32601,"message":"Method not found"},"id":1}', "ping"),
     ).toEqual({ rpcErrorCode: -32601, rpcErrorMessage: "Method not found" });
+  });
+});
+
+describe("diagnostics never disturb the client response", () => {
+  afterEach(() => {
+    logs?.restore();
+    logs = undefined;
+  });
+
+  function toolsListRequest(): Request {
+    return new Request("http://127.0.0.1:8787/mcp", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: '{"jsonrpc":"2.0","id":1,"method":"tools/list"}',
+    });
+  }
+
+  it("hands back the handler's own response object, unread", async () => {
+    logs = captureLogs();
+    const handled = new Response('data: {"result":{"tools":[{"name":"memory_save"}]},"id":1}\n', {
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
+    });
+    const response = await instrumentExchange(toolsListRequest(), async () => handled);
+
+    expect(response).toBe(handled);
+    expect(response.bodyUsed).toBe(false);
+    expect(await response.text()).toContain("memory_save");
+    expect(lastEntry(logs, "mcp.response")).toMatchObject({ toolCount: 1 });
+  });
+
+  it("keeps the response intact when its body cannot be read", async () => {
+    logs = captureLogs();
+    const handled = new Response(
+      new ReadableStream({
+        pull(controller) {
+          controller.error(new Error("upstream stream broke"));
+        },
+      }),
+      { status: 200, headers: { "content-type": "text/event-stream" } },
+    );
+    const response = await instrumentExchange(toolsListRequest(), async () => handled);
+
+    expect(response).toBe(handled);
+    expect(response.bodyUsed).toBe(false);
+    expect(logs.entries("mcp.response_unreadable")).toHaveLength(1);
+    expect(lastEntry(logs, "mcp.response")).toMatchObject({
+      mcpMethod: "tools/list",
+      httpStatus: 200,
+    });
+  });
+
+  it("rethrows a handler exception after logging it", async () => {
+    logs = captureLogs();
+    const failure = new Error("handler exploded");
+    await expect(
+      instrumentExchange(toolsListRequest(), async () => {
+        throw failure;
+      }),
+    ).rejects.toBe(failure);
+    expect(lastEntry(logs, "mcp.exception")).toMatchObject({
+      mcpMethod: "tools/list",
+      errorMessage: "handler exploded",
+    });
   });
 });
 

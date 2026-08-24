@@ -161,9 +161,10 @@ function inspectable(summary: McpEnvelopeSummary, response: Response): boolean {
 
 /**
  * Logs one line when an MCP exchange starts and one when it finishes, so Railway
- * shows which MCP operation a client ran and how it ended.
+ * shows which MCP operation a client ran and how it ended. Diagnostics read only
+ * clones, so the client always receives exactly what the handler produced.
  */
-async function instrumentExchange(
+export async function instrumentExchange(
   request: Request,
   handle: (request: Request) => Promise<Response>,
 ): Promise<Response> {
@@ -191,13 +192,7 @@ async function instrumentExchange(
   let result: McpResultSummary = {};
   if (inspectable(summary, response)) {
     try {
-      const bodyText = await response.text();
-      result = summarizeMcpResult(bodyText, summary.mcpMethod);
-      response = new Response(bodyText, {
-        status: response.status,
-        statusText: response.statusText,
-        headers: response.headers,
-      });
+      result = summarizeMcpResult(await response.clone().text(), summary.mcpMethod);
     } catch (error) {
       logMcpEvent("error", "mcp.response_unreadable", { ...context, ...describeError(error) });
     }
