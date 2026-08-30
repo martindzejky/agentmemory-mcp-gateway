@@ -282,27 +282,31 @@ export function pkce(): { verifier: string; challenge: string } {
   return { verifier, challenge };
 }
 
+export const DEFAULT_TEST_REDIRECT_URI = "http://localhost/callback";
+
 export async function registerClient(
   app: Hono,
   config: GatewayConfig,
-): Promise<{ client_id: string }> {
+  overrides: Record<string, unknown> = {},
+): Promise<{ client_id: string; redirect_uris?: string[] }> {
   const response = await request(app, "/oauth2/register", {
     method: "POST",
     host: config.publicHost,
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
       client_name: "test-client",
-      redirect_uris: ["http://localhost/callback"],
+      redirect_uris: [DEFAULT_TEST_REDIRECT_URI],
       application_type: "native",
       token_endpoint_auth_method: "none",
       grant_types: ["authorization_code", "refresh_token"],
       response_types: ["code"],
+      ...overrides,
     }),
   });
   if (!response.ok) {
     throw new Error(`DCR failed: ${response.status} ${await response.text()}`);
   }
-  return (await response.json()) as { client_id: string };
+  return (await response.json()) as { client_id: string; redirect_uris?: string[] };
 }
 
 export async function signIn(app: Hono, config: GatewayConfig, query = ""): Promise<string> {
@@ -333,9 +337,14 @@ export async function currentSessionId(gateway: GatewayApp, cookies: string): Pr
   return session.session.id;
 }
 
+export function isClientCallback(location: string, redirectUri: string): boolean {
+  return location === redirectUri || location.startsWith(`${redirectUri}?`);
+}
+
 export async function prepareConsentFlow(
   app: Hono,
   config: GatewayConfig,
+  options: { clientId?: string; redirectUri?: string } = {},
 ): Promise<{
   clientId: string;
   verifier: string;
@@ -344,12 +353,13 @@ export async function prepareConsentFlow(
   consentQuery: string;
   csrf: string;
 }> {
-  const client = await registerClient(app, config);
+  const redirectUri = options.redirectUri ?? DEFAULT_TEST_REDIRECT_URI;
+  const clientId = options.clientId ?? (await registerClient(app, config)).client_id;
   const { verifier, challenge } = pkce();
   const authorizeQuery = new URLSearchParams({
     response_type: "code",
-    client_id: client.client_id,
-    redirect_uri: "http://localhost/callback",
+    client_id: clientId,
+    redirect_uri: redirectUri,
     scope: "openid profile offline_access mcp:tools",
     code_challenge: challenge,
     code_challenge_method: "S256",
@@ -375,7 +385,7 @@ export async function prepareConsentFlow(
       });
       cookies = collectCookies(page, cookies);
       return {
-        clientId: client.client_id,
+        clientId,
         verifier,
         cookies,
         consentPath,
@@ -391,7 +401,7 @@ export async function prepareConsentFlow(
     });
     cookies = collectCookies(response, cookies);
     location = response.headers.get("location");
-    if (location?.startsWith("http://localhost/callback") || location?.includes("/callback?")) {
+    if (location && isClientCallback(location, redirectUri)) {
       throw new Error(`Reached client callback before consent: ${location}`);
     }
   }
@@ -426,13 +436,16 @@ export async function postConsent(
   });
 }
 
-export function callbackLocation(response: Response): URL | null {
+export function callbackLocation(
+  response: Response,
+  redirectUri = DEFAULT_TEST_REDIRECT_URI,
+): URL | null {
   const location = response.headers.get("location");
   if (!location) {
     return null;
   }
-  if (location.startsWith("http://localhost/callback") || location.includes("/callback?")) {
-    return new URL(location, "http://localhost");
+  if (isClientCallback(location, redirectUri) || location.includes("/callback?")) {
+    return new URL(location, redirectUri);
   }
   return null;
 }
@@ -440,7 +453,7 @@ export function callbackLocation(response: Response): URL | null {
 export async function exchangeAuthorizationCode(
   app: Hono,
   config: GatewayConfig,
-  input: { code: string; clientId: string; verifier: string },
+  input: { code: string; clientId: string; verifier: string; redirectUri?: string },
 ): Promise<Response> {
   return request(app, "/oauth2/token", {
     method: "POST",
@@ -449,7 +462,7 @@ export async function exchangeAuthorizationCode(
     body: new URLSearchParams({
       grant_type: "authorization_code",
       code: input.code,
-      redirect_uri: "http://localhost/callback",
+      redirect_uri: input.redirectUri ?? DEFAULT_TEST_REDIRECT_URI,
       client_id: input.clientId,
       code_verifier: input.verifier,
       resource: config.mcpResource,
@@ -457,13 +470,18 @@ export async function exchangeAuthorizationCode(
   });
 }
 
-export async function getAccessToken(app: Hono, config: GatewayConfig): Promise<string> {
-  const client = await registerClient(app, config);
+export async function getAccessToken(
+  app: Hono,
+  config: GatewayConfig,
+  options: { clientId?: string; redirectUri?: string } = {},
+): Promise<string> {
+  const redirectUri = options.redirectUri ?? DEFAULT_TEST_REDIRECT_URI;
+  const clientId = options.clientId ?? (await registerClient(app, config)).client_id;
   const { verifier, challenge } = pkce();
   const authorizeQuery = new URLSearchParams({
     response_type: "code",
-    client_id: client.client_id,
-    redirect_uri: "http://localhost/callback",
+    client_id: clientId,
+    redirect_uri: redirectUri,
     scope: "openid profile offline_access mcp:tools",
     code_challenge: challenge,
     code_challenge_method: "S256",
@@ -498,7 +516,10 @@ export async function getAccessToken(app: Hono, config: GatewayConfig): Promise<
         nextLocation = `${current.pathname}${current.search}`;
       }
     }
-    if (!nextLocation && preview.includes("http://localhost/callback")) {
+    if (
+      !nextLocation &&
+      (preview.includes(redirectUri) || preview.includes("http://localhost/callback"))
+    ) {
       try {
         const body = JSON.parse(preview) as { url?: string; redirect_uri?: string };
         nextLocation = body.url ?? body.redirect_uri ?? null;
@@ -511,8 +532,8 @@ export async function getAccessToken(app: Hono, config: GatewayConfig): Promise<
     );
     location = nextLocation;
 
-    if (location?.startsWith("http://localhost/callback") || location?.includes("/callback?")) {
-      const target = new URL(location, "http://localhost");
+    if (location && isClientCallback(location, redirectUri)) {
+      const target = new URL(location, redirectUri);
       const code = target.searchParams.get("code");
       if (!code) {
         throw new Error(`Authorization redirect omitted code: ${location}\n${trace.join("\n")}`);
@@ -524,8 +545,8 @@ export async function getAccessToken(app: Hono, config: GatewayConfig): Promise<
         body: new URLSearchParams({
           grant_type: "authorization_code",
           code,
-          redirect_uri: "http://localhost/callback",
-          client_id: client.client_id,
+          redirect_uri: redirectUri,
+          client_id: clientId,
           code_verifier: verifier,
           resource: config.mcpResource,
         }),

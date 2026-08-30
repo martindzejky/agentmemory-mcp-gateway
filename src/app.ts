@@ -5,6 +5,7 @@ import { secureHeaders } from "hono/secure-headers";
 import { createAgentMemoryClient, type AgentMemoryRequestLog } from "./agentmemory.js";
 import { createGatewayAuth, isAdminSubject, type GatewayAuth } from "./auth.js";
 import type { GatewayConfig } from "./config.js";
+import { provisionCursorOAuthClient } from "./cursor-oauth.js";
 import {
   createConsentCsrfToken,
   internalConsentHeaders,
@@ -66,6 +67,7 @@ export async function createGatewayApp(
     requireSoleUser: options.requireSoleUser,
     productionOriginChecks: options.productionOriginChecks,
   });
+  await provisionCursorOAuthClient(gatewayAuth.auth, config);
   const client = createAgentMemoryClient(config, { requestLog: options.agentMemoryRequestLog });
   const mcpHandler =
     gatewayAuth.adminUser &&
