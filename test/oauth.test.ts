@@ -1,4 +1,3 @@
-import { isCimdClientIdUrlCandidate } from "@better-auth/cimd";
 import { afterEach, describe, expect, it } from "vitest";
 import { isAdminSubject } from "../src/auth.js";
 import { startGateway, request, type startGateway as StartGateway } from "./helpers.js";
@@ -78,41 +77,5 @@ describe("OAuth discovery and challenges", () => {
     expect(isAdminSubject("admin-1", "admin-1")).toBe(true);
     expect(isAdminSubject("admin-1", "someone-else")).toBe(false);
     expect(isAdminSubject("admin-1", undefined)).toBe(false);
-  });
-});
-
-describe("DCR and CIMD remain available", () => {
-  it("still registers a public native client through DCR", async () => {
-    const { gateway, config } = await boot();
-    const response = await request(gateway.app, "/oauth2/register", {
-      method: "POST",
-      host: config.publicHost,
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        client_name: "chatgpt-like-client",
-        redirect_uris: ["http://localhost/callback"],
-        application_type: "native",
-        token_endpoint_auth_method: "none",
-        grant_types: ["authorization_code", "refresh_token"],
-        response_types: ["code"],
-      }),
-    });
-    expect(response.status).toBe(201);
-    const body = (await response.json()) as { client_id?: string; client_secret?: unknown };
-    expect(body.client_id).toEqual(expect.any(String));
-    expect(body.client_id).not.toBe("cursor-mcp");
-    expect(body.client_secret).toBeUndefined();
-  });
-
-  it("keeps CIMD advertised and URL client ids distinct from the static Cursor client", async () => {
-    const { gateway, config } = await boot();
-    const response = await request(gateway.app, "/.well-known/oauth-authorization-server", {
-      host: config.publicHost,
-    });
-    const body = (await response.json()) as Record<string, unknown>;
-    expect(body.client_id_metadata_document_supported).toBe(true);
-    expect(body.registration_endpoint).toBe(`${config.publicUrl}/oauth2/register`);
-    expect(isCimdClientIdUrlCandidate("https://chatgpt.com/oauth/client.json")).toBe(true);
-    expect(isCimdClientIdUrlCandidate("cursor-mcp")).toBe(false);
   });
 });

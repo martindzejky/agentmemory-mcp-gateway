@@ -12,7 +12,7 @@ MCP clients authenticate to this service. This service authenticates to AgentMem
 - Forwards allowlisted `tools/list` and `tools/call` traffic to AgentMemory REST
 - Fails closed when AgentMemory is unavailable
 
-Intended clients: ChatGPT, Notion Custom Agents, Cursor (static OAuth), Codex cloud, and other standards-compliant remote MCP clients.
+Intended clients: ChatGPT, Notion Custom Agents, Codex cloud, and other standards-compliant remote MCP clients.
 
 Public URL shape:
 
@@ -203,45 +203,6 @@ ChatGPT discovers `/.well-known/oauth-protected-resource` and the authorization-
 4. Sign in as the seeded user and approve consent.
 5. Enable only the tools that agent should use.
 
-## Connecting Cursor
-
-Cursor's Dynamic Client Registration omits `application_type` while sending a custom-scheme redirect. Better Auth correctly rejects that as a web client. Do not loosen redirect validation. Use Cursor's static OAuth client instead.
-
-The gateway provisions one public PKCE client on startup:
-
-| Field         | Value                                                                                |
-| ------------- | ------------------------------------------------------------------------------------ |
-| `CLIENT_ID`   | `cursor-mcp`                                                                         |
-| Client type   | Public (`token_endpoint_auth_method: none`)                                          |
-| Client secret | none                                                                                 |
-| Redirect URIs | `https://www.cursor.com/agents/mcp/oauth/callback`, `http://localhost:8787/callback` |
-
-Restart and redeploy reuse that same row. They do not create a second Cursor client or rewrite other OAuth clients.
-
-Add this to `~/.cursor/mcp.json` or `.cursor/mcp.json`:
-
-```json
-{
-  "mcpServers": {
-    "agentmemory": {
-      "url": "https://memory-mcp.martinjakubik.com/mcp",
-      "auth": {
-        "CLIENT_ID": "cursor-mcp",
-        "scopes": ["openid", "profile", "offline_access", "mcp:tools"]
-      }
-    }
-  }
-}
-```
-
-Omit `CLIENT_SECRET`. Cursor Cloud Agents, cursor.com, and mobile clients that use the Cloud Agent MCP configuration authenticate through `https://www.cursor.com/agents/mcp/oauth/callback`. The desktop IDE and CLI use `http://localhost:8787/callback`.
-
-Sign in as the seeded administrator and approve consent. Only that user can complete the grant.
-
-The legacy `cursor://anysphere.cursor-mcp/oauth/callback` URI is not registered. Better Auth 1.7 requires native private-use schemes to be reverse-domain and authority-free (RFC 8252). Registering `cursor://` would mean weakening that check. Older Cursor DCR-only flows that still send that URI will keep failing; configure the static `auth.CLIENT_ID` above instead.
-
-No new environment variables are required. CIMD and DCR stay enabled for ChatGPT and Notion.
-
 ## Basic end-to-end verification
 
 ```sh
@@ -288,7 +249,6 @@ SQLite is the source of truth for OAuth clients, refresh tokens, and consent.
 
 - Delete or rotate `BETTER_AUTH_SECRET` only if you intend to invalidate signing material and re-seed carefully.
 - Removing an `oauthClient` row, related tokens, and consent records revokes that client.
-- The Cursor static client is the `oauthClient` row with `clientId` `cursor-mcp` / `softwareId` `agentmemory-mcp-gateway:cursor`. Deleting only that row revokes Cursor. The next restart recreates it. Other clients are left alone.
 - Replacing the SQLite file logs every client out.
 
 There is no admin API. Use a one-off sqlite3 session against the volume if you need to revoke a specific client.
