@@ -101,14 +101,39 @@ async function linkMcpResource(
   if (linked) {
     return;
   }
-  await adapter.create({
-    model: "oauthClientResource",
-    data: {
-      clientId,
-      resourceId: resource,
-      createdAt: new Date(),
-    },
-  });
+  try {
+    await adapter.create({
+      model: "oauthClientResource",
+      data: {
+        clientId,
+        resourceId: resource,
+        createdAt: new Date(),
+      },
+    });
+  } catch {
+    const raced = await adapter.findOne({
+      model: "oauthClientResource",
+      where: [
+        { field: "clientId", value: clientId },
+        { field: "resourceId", value: resource },
+      ],
+    });
+    if (raced) {
+      return;
+    }
+    throw new Error("Failed to link the Cursor OAuth client to the MCP resource");
+  }
+}
+
+async function ensureCursorClientReady(
+  auth: AuthInstance,
+  clientId: string,
+  resource: string,
+  created: boolean,
+): Promise<{ clientId: string; created: boolean }> {
+  await linkMcpResource(auth, clientId, resource);
+  safeLog("cursor oauth client ready", { clientId, created });
+  return { clientId, created };
 }
 
 /**
@@ -116,6 +141,7 @@ async function linkMcpResource(
  *
  * Creates the row only when client_id `cursor-mcp` is absent. A DCR
  * client that copies the software id is ignored and is not overwritten.
+ * Always ensures the MCP resource link exists for that client_id.
  */
 export async function provisionCursorOAuthClient(
   auth: AuthInstance,
@@ -123,8 +149,7 @@ export async function provisionCursorOAuthClient(
 ): Promise<{ clientId: string; created: boolean }> {
   const existing = await findCursorOAuthClient(auth);
   if (existing) {
-    safeLog("cursor oauth client ready", { clientId: existing.clientId, created: false });
-    return { clientId: existing.clientId, created: false };
+    return ensureCursorClientReady(auth, existing.clientId, config.mcpResource, false);
   }
 
   const now = new Date();
@@ -154,12 +179,9 @@ export async function provisionCursorOAuthClient(
   } catch {
     const raced = await findCursorOAuthClient(auth);
     if (raced) {
-      safeLog("cursor oauth client ready", { clientId: raced.clientId, created: false });
-      return { clientId: raced.clientId, created: false };
+      return ensureCursorClientReady(auth, raced.clientId, config.mcpResource, false);
     }
     throw new Error("Failed to provision the Cursor OAuth client");
   }
-  await linkMcpResource(auth, CURSOR_OAUTH_CLIENT_ID, config.mcpResource);
-  safeLog("cursor oauth client ready", { clientId: CURSOR_OAUTH_CLIENT_ID, created: true });
-  return { clientId: CURSOR_OAUTH_CLIENT_ID, created: true };
+  return ensureCursorClientReady(auth, CURSOR_OAUTH_CLIENT_ID, config.mcpResource, true);
 }

@@ -9,6 +9,7 @@ import {
   listOAuthClients,
   provisionCursorOAuthClient,
 } from "../src/cursor-oauth.js";
+import type { GatewayApp } from "../src/app.js";
 import type { GatewayConfig } from "../src/config.js";
 import {
   getAccessToken,
@@ -78,6 +79,15 @@ async function authorize(
     headers: { cookie: cookies },
     redirect: "manual",
   });
+}
+
+function cursorResourceLinkCount(db: GatewayApp["db"], resource: string): number {
+  const row = db
+    .prepare(
+      `SELECT COUNT(*) AS count FROM oauthClientResource WHERE clientId = ? AND resourceId = ?`,
+    )
+    .get(CURSOR_OAUTH_CLIENT_ID, resource) as { count: number };
+  return row.count;
 }
 
 function jwtSubject(token: string): string | undefined {
@@ -268,5 +278,26 @@ describe("Cursor static OAuth client", () => {
     expect(clients.some((client) => client.clientId === squat.client_id)).toBe(true);
     const cursor = clients.find((client) => client.clientId === CURSOR_OAUTH_CLIENT_ID);
     expect(cursor?.softwareId).toBe(CURSOR_OAUTH_SOFTWARE_ID);
+  });
+
+  it("repairs a missing MCP resource link for an existing Cursor client", async () => {
+    const { gateway, config } = await boot();
+    expect(cursorResourceLinkCount(gateway.db, config.mcpResource)).toBe(1);
+
+    gateway.db
+      .prepare(`DELETE FROM oauthClientResource WHERE clientId = ? AND resourceId = ?`)
+      .run(CURSOR_OAUTH_CLIENT_ID, config.mcpResource);
+    expect(cursorResourceLinkCount(gateway.db, config.mcpResource)).toBe(0);
+    expect(await findCursorOAuthClient(gateway.auth)).not.toBeNull();
+
+    const repaired = await provisionCursorOAuthClient(gateway.auth, config);
+    expect(repaired).toEqual({ clientId: CURSOR_OAUTH_CLIENT_ID, created: false });
+    expect(cursorResourceLinkCount(gateway.db, config.mcpResource)).toBe(1);
+
+    const token = await getAccessToken(gateway.app, config, {
+      clientId: CURSOR_OAUTH_CLIENT_ID,
+      redirectUri: CURSOR_OAUTH_REDIRECT_URIS[1],
+    });
+    expect(jwtSubject(token)).toBe(gateway.adminUserId);
   });
 });
